@@ -97,8 +97,11 @@ public abstract class BackendEntryIterator
     }
 
     protected final void checkCapacity() throws LimitExceedException {
-        // Stop if reach capacity
-        this.query.checkCapacity(this.count);
+        // TODO: delete if
+        if (this.query.resultType().isGraph()) {
+            // Stop if reach capacity
+            this.query.checkCapacity(this.count);
+        }
     }
 
     protected final boolean exceedLimit() {

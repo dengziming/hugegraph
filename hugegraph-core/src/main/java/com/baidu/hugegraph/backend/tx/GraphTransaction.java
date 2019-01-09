@@ -305,14 +305,30 @@ public class GraphTransaction extends IndexableTransaction {
         }
     }
 
+    public IndexIdsHolderChain indexQuery(ConditionQuery query) {
+        /*
+         * Optimize by index-query
+         * It will return a list of id (maybe empty) if success,
+         * or throw exception if there is no any index for query properties.
+         */
+        this.beforeRead();
+        try {
+            return this.indexTx.indexQuery(query);
+        } finally {
+            this.afterRead();
+        }
+    }
+
     @Override
     public Iterator<BackendEntry> query(Query query) {
         if (!(query instanceof ConditionQuery)) {
             return super.query(query);
         }
 
+        boolean paging = query.paging();
+        IndexIdsHolderChain chain = new IndexIdsHolderChain(query.paging());
         List<Query> queries = new ArrayList<>();
-        IdQuery ids = new IdQuery(query.resultType(), query);
+
         for (ConditionQuery cq: ConditionQueryFlatten.flatten(
                                 (ConditionQuery) query)) {
             Query q = this.optimizeQuery(cq);
@@ -321,18 +337,37 @@ public class GraphTransaction extends IndexableTransaction {
              * 1.sysprop-query, which would not be empty.
              * 2.index-query result(ids after optimization), which may be empty.
              */
-            if (q.getClass() == IdQuery.class && !q.ids().isEmpty()) {
-                ids.query(q.ids());
+            if (q == null) {
+                chain.link(this.indexQuery(cq));
             } else if (!q.empty()) {
                 // Return empty if there is no result after index-query
                 queries.add(q);
             }
         }
 
+        Iterator<IndexIdsHolder> idsHolders = chain.toIterator();
         ExtendableIterator<BackendEntry> rs = new ExtendableIterator<>();
-        if (!ids.empty()) {
-            queries.add(ids);
+        if (paging) {
+            idsHolders.forEachRemaining(idsHolder -> {
+                rs.extend(new MapperIterator<>(idsHolder.iterator(), (id) -> {
+                    IdQuery idQuery = new IdQuery(query.resultType(), id);
+                    Iterator<BackendEntry> results = super.query(idQuery);
+                    if (results.hasNext()) {
+                        return results.next();
+                    } else {
+                        return null;
+                    }
+                }));
+            });
+        } else {
+            idsHolders.forEachRemaining(idsHolder -> {
+                Set<Id> ids = ((EntireIndexIdsHolder) idsHolder).all();
+                if (!ids.isEmpty()) {
+                    queries.add(new IdQuery(query, ids));
+                }
+            });
         }
+
         for (Query q : queries) {
             rs.extend(super.query(q));
         }
@@ -934,7 +969,7 @@ public class GraphTransaction extends IndexableTransaction {
         }
     }
 
-    protected Query optimizeQuery(ConditionQuery query) {
+    private Query optimizeQuery(ConditionQuery query) {
         Id label = (Id) query.condition(HugeKeys.LABEL);
 
         // Optimize vertex query
@@ -1018,18 +1053,8 @@ public class GraphTransaction extends IndexableTransaction {
                 return query;
             }
         }
-
-        /*
-         * Optimize by index-query
-         * It will return a list of id (maybe empty) if success,
-         * or throw exception if there is no any index for query properties.
-         */
-        this.beforeRead();
-        try {
-            return this.indexTx.indexQuery(query);
-        } finally {
-            this.afterRead();
-        }
+        // TODO: any better value?
+        return null;
     }
 
     private VertexLabel checkVertexLabel(Object label, boolean verifyLabel) {
